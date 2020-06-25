@@ -131,6 +131,11 @@ class Connection
     protected $minutelyLimitRemaining;
 
     /**
+     * @var mixed
+     */
+    private $batch = [];
+
+    /**
      * @return Client
      */
     private function client()
@@ -259,6 +264,35 @@ class Connection
 
     /**
      * @param string $url
+     * @param array  $params
+     * @param array  $headers
+     *
+     * @throws ApiException
+     *
+     * @return mixed
+     */
+    public function batchGet($url, array $params = [], array $headers = [], $callbacks = null, $item = null, $metaData = null)
+    {
+        $batchEndPoint = substr($url, 0, strpos($url, "/"));
+        $url = $this->formatUrl($url, $url !== 'current/Me', $url == $this->nextUrl);
+
+        try {
+            $request = $this->createRequest('GET', $url, null, $params, $headers);
+
+            $batch = new \stdClass();
+            $batch->request = $request;
+            $batch->callbacks = $callbacks;
+            $batch->item = $item;
+            $batch->metaData = $metaData;
+
+            $this->addBatchRequestDataToBatch($batchEndPoint, $batch);
+        } catch (Exception $e) {
+            $this->parseExceptionForErrorMessages($e);
+        }
+    }
+    
+    /**
+     * @param string $url
      * @param mixed  $body
      *
      * @throws ApiException
@@ -287,6 +321,34 @@ class Connection
      *
      * @return mixed
      */
+    public function batchPost($url, $body, $callbacks = null, $item = null, $metaData = null)
+    {
+        $batchEndPoint = substr($url, 0, strpos($url, "/"));
+        $url = $this->formatUrl($url);
+
+        try {
+            $request = $this->createRequest('POST', $url, $body);
+
+            $batch = new \stdClass();
+            $batch->request = $request;
+            $batch->callbacks = $callbacks;
+            $batch->item = $item;
+            $batch->metaData = $metaData;
+
+            $this->addBatchRequestDataToBatch($batchEndPoint, $batch);
+        } catch (Exception $e) {
+            $this->parseExceptionForErrorMessages($e);
+        }
+    }
+    
+    /**
+     * @param string $url
+     * @param mixed  $body
+     *
+     * @throws ApiException
+     *
+     * @return mixed
+     */
     public function put($url, $body)
     {
         $url = $this->formatUrl($url);
@@ -301,6 +363,34 @@ class Connection
         }
     }
 
+    /**
+     * @param string $url
+     * @param mixed  $body
+     *
+     * @throws ApiException
+     *
+     * @return mixed
+     */
+    public function batchPut($url, $body, $callbacks = null, $item = null, $metaData = null)
+    {
+        $batchEndPoint = substr($url, 0, strpos($url, "/"));
+        $url = $this->formatUrl($url);
+
+        try {
+            $request = $this->createRequest('PUT', $url, $body);
+
+            $batch = new \stdClass();
+            $batch->request = $request;
+            $batch->callbacks = $callbacks;
+            $batch->item = $item;
+            $batch->metaData = $metaData;
+
+            $this->addBatchRequestDataToBatch($batchEndPoint, $batch);
+        } catch (Exception $e) {
+            $this->parseExceptionForErrorMessages($e);
+        }
+    }
+    
     /**
      * @param string $url
      *
@@ -322,6 +412,47 @@ class Connection
         }
     }
 
+    /**
+     * @param string $url
+     *
+     * @throws ApiException
+     *
+     * @return mixed
+     */
+    public function batchDelete($url, $callbacks = null, $item = null, $metaData = null)
+    {
+        $batchEndPoint = substr($url, 0, strpos($url, "/"));
+        $url = $this->formatUrl($url);
+
+        try {
+            $request = $this->createRequest('DELETE', $url);
+
+            $batch = new \stdClass();
+            $batch->request = $request;
+            $batch->callbacks = $callbacks;
+            $batch->item = $item;
+            $batch->metaData = $metaData;
+
+            $this->addBatchRequestDataToBatch($batchEndPoint, $batch);
+        } catch (Exception $e) {
+            $this->parseExceptionForErrorMessages($e);
+        }
+    }
+    
+    private function addBatchRequestDataToBatch($batchEndPoint, $batchRequestData)
+    {
+        //$endpoint = $this->formatUrl('logistics/$batch');
+        //$endpoint = $this->formatUrl('crm/$batch');
+        //$endpoint = $this->formatUrl('cashflow/$batch');
+        if (!in_array($batchEndPoint, ['logistics', 'crm', 'cashflow', 'purchaseorder', 'salesinvoice'])) {
+            throw new ApiException("Unkown batch endpoint: " . $batchEndPoint . " in " . __class__ . "::" . __FUNCTION__);
+        }
+        if (!array_key_exists($batchEndPoint, $this->batch)) {
+            $this->batch[$batchEndPoint] = [];
+        }
+        $this->batch[$batchEndPoint][] = $batchRequestData;
+    }
+    
     /**
      * @return string
      */
@@ -764,5 +895,261 @@ class Connection
 
         $this->minutelyLimit = (int) $response->getHeaderLine('X-RateLimit-Minutely-Limit');
         $this->minutelyLimitRemaining = (int) $response->getHeaderLine('X-RateLimit-Minutely-Remaining');
+    }
+    
+    public function runBatch($debug = false)
+    {
+        if ($debug) {
+            echo "We have " . count($this->batch) . " batch endpoints in batch";
+        }
+
+        if (count($this->batch) == 0) {
+            return true;
+        }
+
+        foreach ($this->batch as $batchEndPoint => $batches) {
+            if (count($batches) == 0) {
+                continue;//empty batch endpoint
+            }
+
+            $currentBatch = [];
+            $currentBatchLength = 0;
+            $changes = [];
+            $gets = [];
+
+            foreach ($batches as $batch) {
+                $simpleHeaders = [];
+                $simpleHeaders[] = "Content-Type: application/http";
+                $simpleHeaders[] = "Content-Transfer-Encoding: binary";
+
+                $part = "";
+                $part .= implode("\r\n", $simpleHeaders) . "\r\n\r\n";
+                $part .= $batch->request->getMethod() . " " . $batch->request->getUri() . " HTTP/1.1\r\n";
+
+                $contents = $batch->request->getBody()->getContents();
+                if ($contents != '') {
+                    $simpleHeaders = [];
+                    $simpleHeaders[] = "Content-Type: application/json";
+                    $simpleHeaders[] = "Accept: application/json";
+
+                    $part .= implode("\r\n", $simpleHeaders) . "\r\n\r\n";
+                    $part .= $contents;
+                } else {
+                    $simpleHeaders = [];
+                    $simpleHeaders[] = "Accept: application/json";
+
+                    $part .= implode("\r\n", $simpleHeaders) . "\r\n";
+                }
+                $part .= "\r\n";
+
+                if ($currentBatchLength + strlen($part) > 9 * 1024 * 1024) {
+                    break;//we stoppen hier voor de huidige batch..
+                }
+
+                if ($batch->request->getMethod() == "GET") {
+                    $gets[] = $part;
+                } else {
+                    $changes[] = $part;
+                }
+
+                $currentBatch[] = $batch;
+                $currentBatchLength += strlen($part);
+                array_shift($this->batch[$batchEndPoint]);
+            }
+
+            try {
+                $batchId = 1;
+
+                $headers = [
+                    'Accept' => 'application/json',
+                    'Content-Type' => 'multipart/mixed; boundary=batch_' . $batchId,
+                    'Prefer' => 'return=representation',
+                ];
+
+                //LET OP: we doen eerst changes, dan gets
+                $body = '--batch_' . $batchId . "\r\n";
+                if (count($changes) > 0) {
+                    $changeSetId = 1;
+                    $body .= "Content-Type: multipart/mixed; boundary=changeset_" . $changeSetId . "\r\n\r\n";
+                    $body .= "--changeset_" . $changeSetId . "\r\n";
+                    $body .= implode($changes, "\r\n\r\n--changeset_" . $changeSetId . "\r\n");
+                    $body .= "--changeset_" . $changeSetId . "--\r\n\r\n";
+                    $body .= '--batch_' . $batchId;
+                }
+                if (count($gets) > 0) {
+                    if (count($changes) > 0) {
+                        $body .= "\r\n";
+                    }
+                    $body .= implode($gets, "\r\n\r\n--batch_" . $batchId . "\r\n");
+                    $body .= '--batch_' . $batchId;
+                }
+                $body .= '--';
+
+
+                //echo "<pre>".$body."</pre>";
+                //exit();
+
+                // If access token is not set or token has expired, acquire new token
+                if (empty($this->accessToken) || $this->tokenHasExpired()) {
+                    $this->acquireAccessToken();
+                }
+
+                // If we have a token, sign the request
+                if (!$this->needsAuthentication() && !empty($this->accessToken)) {
+                    $headers['Authorization'] = 'Bearer ' . $this->accessToken;
+                }
+
+                $endpoint = $this->formatUrl($batchEndPoint . '/$batch');
+                $params = [];
+
+                // Create param string
+                if (!empty($params)) {
+                    $endpoint .= '?' . http_build_query($params);
+                }
+
+                // Create the request
+                $request = new Request("POST", $endpoint, $headers, $body);
+                $response = $this->client()->send($request);
+
+                $responseText = $response->getBody()->getContents();
+
+                $responses = [];
+                $batchSplit = explode("\r\n--batchresponse_", $responseText);
+                foreach ($batchSplit as $splitIndex => $batchResponse) {
+                    if ($splitIndex == 0 && count($changes) > 0) {
+                        //first batch reserved for changes
+                        $responseSplit = explode("\r\n--changesetresponse_", $batchResponse);
+                        array_shift($responseSplit);
+                        array_pop($responseSplit);
+
+                        foreach ($responseSplit as $changeResponse) {
+                            $responses[] = $changeResponse;
+                        }
+                    } else {
+                        //get responses
+                        $responses[] = $batchResponse;
+                    }
+                }
+
+                //print_r($responses);
+                //exit();
+
+                if (1 == 1) {
+                    $changesProcessed = 0;
+                    $getsProcessed = 0;
+
+                    foreach ($currentBatch as $index => $batch) {
+                        //we moeten herleiden welke response bij deze batch hoort, terugrekenen
+                        if ($batch->request->getMethod() == "GET") {
+                            //get requests komen na de changes binnen
+                            $responseIndex = $index + count($changes) - $changesProcessed;
+                            $getsProcessed++;
+                        } else {
+                            $responseIndex = $index - $getsProcessed;
+                            $changesProcessed++;
+                        }
+
+
+                        if (!isset($responses[$responseIndex])) {
+                            echo "No response available for batchIndex " . $index . ": " . $responseText . "<br />\n";
+                            continue;
+                        }
+
+                        $response = $responses[$responseIndex];
+
+                        $responseHeaderSplit = explode("\r\n\r\n", $response, 3);
+                        //print_r($responseHeaderSplit);
+                        $batchHeader = $responseHeaderSplit[1];
+                        $batchResponse = $responseHeaderSplit[2];
+
+                        if ($debug) {
+                            echo "Batch " . $index . " <pre>" . htmlspecialchars($batchHeader) . "</pre> response: <pre>" . htmlspecialchars($batchResponse) . "</pre><br /><br />";
+                        }
+
+                        $responseSuccess = false;
+
+                        if ($batchResponse != '') {
+                            $json = json_decode($batchResponse, true);
+                            if (is_array($json)) {
+                                //fill the object first
+                                if (array_key_exists("d", $json)) {
+                                    if (array_key_exists("results", $json["d"])) {
+                                        if (count($json["d"]["results"]) == 1 && $batch->request->getMethod() != "GET") {
+                                            if (isset($batch->item) && is_object($batch->item)) {
+                                                foreach ($json["d"]["results"][0] as $key => $value) {
+                                                    $batch->item->{$key} = $value;
+                                                }
+                                                $responseSuccess = true;
+                                            }
+                                        } else {
+                                            //we did a batch get, we can process results here and use the __nextUrl
+                                            //echo "BATCH GET RECEIVED YAY!: ".$batchResponse;
+                                            //Als we problemen krijgen, moeten we dit stukje hier rechtzetten
+                                            //
+                                            //if (! empty($divisionId)) {
+                                            //    $this->connection()->setDivision($originalDivision); // Restore division
+                                            //}
+
+                                            $results = $batch->item->collectionFromResult($json["d"]["results"]);
+                                            if ($batch->callbacks !== null && is_object($batch->callbacks) && isset($batch->callbacks->success) && is_callable($batch->callbacks->success)) {
+                                                call_user_func($batch->callbacks->success, $results, $batch->metaData);
+                                            }
+                                        }
+                                    } else {
+                                        if (isset($batch->item) && is_object($batch->item)) {
+                                            foreach ($json["d"] as $key => $value) {
+                                                $batch->item->{$key} = $value;
+                                            }
+                                            $responseSuccess = true;
+                                        }
+                                        //$object->fill($json["d"]);
+                                    }
+                                } else if (array_key_exists("error", $json)) {
+                                    if (array_key_exists("message", $json["error"]) && array_key_exists("value", $json["error"]["message"]) && $json["error"]["message"]["value"] == "Gegeven bestaat reeds.") {
+                                        echo "Gegeven bestaat reeds!<br />\n";
+                                        break;//we end reading results.. because this error occured
+                                    } else if (array_key_exists("message", $json["error"]) && array_key_exists("value", $json["error"]["message"]) && $json["error"]["message"]["value"] == "Moet zijn: Uniek - Artikel, Valuta, Eenheid, Aantal, Actief vanaf") {
+                                        if ($batch->callbacks !== null && is_object($batch->callbacks) && isset($batch->callbacks->duplicate) && is_callable($batch->callbacks->duplicate)) {
+                                            call_user_func($batch->callbacks->duplicate, $batch->item, $batch->metaData);
+                                        } else {
+                                            throw new ErrorException("on-duplicate callback not implemented");
+                                        }
+                                        //echo "Duplicate insert!<br />\n";
+                                        break;//we end reading results.. because this error occured
+                                    } else {
+                                        echo "<div onClick=\"document.getElementById('responseBody').style.display = 'block';\">Error occurred</div> <pre id=\"responseBody\" style=\"display: none;\">" . htmlspecialchars($body) . "</pre><pre>" . htmlspecialchars(print_r($json["error"], true)) . "</pre><br />\n";
+                                    }
+                                } else {
+                                    echo "Result not fillable? <pre>" . htmlspecialchars(print_r($json, true)) . "</pre>" . "<br />\n";
+                                }
+                            } else {
+                                echo "Unexpected response for batch " . $index . ": <pre>" . htmlspecialchars($batchHeader) . "</pre> body <pre>" . htmlspecialchars($batchResponse) . "</pre><br />";
+                            }
+                        } else if (strpos($batchHeader, "HTTP/1.1 204 No Content") !== false) {
+                            //then call the callback
+                            $responseSuccess = true;
+                        } else if ($batchHeader == "" && $batchResponse == "") {
+                            //empty response, due to previous error...
+                        } else {
+                            echo "Batch " . $index . " unexpected output <pre>" . htmlspecialchars($batchHeader) . "</pre> response: <pre>" . htmlspecialchars($batchResponse) . "</pre><br /><br />";
+                        }
+
+                        if ($responseSuccess) {
+                            //then call the callback
+                            if ($batch->callbacks !== null && is_object($batch->callbacks) && isset($batch->callbacks->success) && is_callable($batch->callbacks->success)) {
+                                call_user_func($batch->callbacks->success, $batch->item, $batch->metaData);
+                            }
+                        }
+                    }
+                } else {
+                    echo "Invalid response count?!" . "<br />\n";
+                    echo "<pre>" . htmlspecialchars($responseText) . "</pre>" . "<br />\n";
+                }
+
+                //return $this->parseResponse($response);
+            } catch (Exception $e) {
+                $this->parseExceptionForErrorMessages($e);
+            }
+        }
     }
 }

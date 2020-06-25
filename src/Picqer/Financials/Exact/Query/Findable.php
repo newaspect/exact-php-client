@@ -115,6 +115,42 @@ trait Findable
         return $this->collectionFromResult($result);
     }
 
+    public function batchFilter($filter, $expand = '', $select = '', $system_query_options = null, array $headers = [], $callbacks = null, $metaData = null)
+    {
+        $originalDivision = $this->connection()->getDivision();
+
+        if ($this->isFillable('Division') && preg_match("@Division[\t\r\n ]+eq[\t\r\n ]+([0-9]+)@i", $filter, $divisionId)) {
+            $this->connection()->setDivision($divisionId[1]); // Fix division
+        }
+
+        $request = [
+            '$filter' => $filter,
+        ];
+        if (strlen($expand) > 0) {
+            $request['$expand'] = $expand;
+        }
+        if (strlen($select) > 0) {
+            $request['$select'] = $select;
+        }
+        if (is_array($system_query_options)) {
+            // merge in other options
+            // no verification of proper system query options
+            $request = array_merge($system_query_options, $request);
+        }
+
+        $this->connection()->batchGet($this->url(), $request, $headers, $callbacks, $this, $metaData);
+
+        /*
+        $result = "";
+        
+        if (! empty($divisionId)) {
+            $this->connection()->setDivision($originalDivision); // Restore division
+        }
+
+        return $this->collectionFromResult($result);
+        */
+    }
+    
     /**
      * Returns the first Financial model in by applying $top=1 to the query string.
      *
